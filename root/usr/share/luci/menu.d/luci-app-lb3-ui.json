@@ -1,0 +1,14 @@
+{
+	"admin/network/lb3": {
+		"title": "三线负载均衡",
+		"order": 48,
+		"action": {
+			"type": "view",
+			"path": "lb3/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-lb3-ui" ]
+		}
+	}
+}
+

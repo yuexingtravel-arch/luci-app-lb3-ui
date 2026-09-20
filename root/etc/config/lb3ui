@@ -1,0 +1,6 @@
+config globals 'main'
+	option mode 'balance'
+	option wan_weight '1'
+	option wan2_weight '1'
+	option wan3_weight '1'
+

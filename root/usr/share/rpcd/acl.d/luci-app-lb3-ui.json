@@ -1,0 +1,18 @@
+{
+	"luci-app-lb3-ui": {
+		"description": "三线负载均衡状态与控制",
+		"read": {
+			"ubus": {
+				"luci.lb3": [ "status" ]
+			},
+			"uci": [ "lb3ui" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.lb3": [ "setConfig", "service" ]
+			},
+			"uci": [ "lb3ui" ]
+		}
+	}
+}
+

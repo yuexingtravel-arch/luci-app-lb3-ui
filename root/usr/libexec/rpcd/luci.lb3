@@ -1,0 +1,182 @@
+#!/bin/sh
+
+UCI=lb3ui.main
+
+json_escape() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/[[:cntrl:]]//g'
+}
+
+uci_get() {
+	uci -q get "$UCI.$1" 2>/dev/null || printf '%s' "$2"
+}
+
+read_num() {
+	local value
+	value=$(cat "$1" 2>/dev/null)
+	case "$value" in ''|*[!0-9]*) value=0;; esac
+	printf '%s' "$value"
+}
+
+iface_json() {
+	local name="$1" label="$2" table="$3" mark="$4" cfg_weight="$5"
+	local data up dev ip uptime rx tx packets bytes route_ok
+	data=$(ubus call "network.interface.$name" status 2>/dev/null)
+	up=$(printf '%s' "$data" | jsonfilter -e '@.up' 2>/dev/null)
+	dev=$(printf '%s' "$data" | jsonfilter -e '@.l3_device' 2>/dev/null)
+	ip=$(printf '%s' "$data" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+	uptime=$(printf '%s' "$data" | jsonfilter -e '@.uptime' 2>/dev/null)
+	[ "$up" = true ] || up=false
+	[ -n "$dev" ] || dev="pppoe-$name"
+	case "$uptime" in ''|*[!0-9]*) uptime=0;; esac
+	rx=$(read_num "/sys/class/net/$dev/statistics/rx_bytes")
+	tx=$(read_num "/sys/class/net/$dev/statistics/tx_bytes")
+	set -- $(nft -a list table inet lb 2>/dev/null | grep "comment \"lb3-$name\"" | awk '{ for (i=1;i<=NF;i++) { if ($i=="packets") p+=$(i+1); if ($i=="bytes") b+=$(i+1) } } END { print p+0, b+0 }')
+	packets=${1:-0}; bytes=${2:-0}
+	ip -4 route show table "$table" 2>/dev/null | grep -q "^default.*dev $dev" && route_ok=true || route_ok=false
+	printf '{"name":"%s","label":"%s","table":%s,"mark":"%s","up":%s,"device":"%s","ip":"%s","uptime":%s,"rx_bytes":%s,"tx_bytes":%s,"flows":%s,"flow_bytes":%s,"route_ok":%s,"weight":%s}' \
+		"$name" "$label" "$table" "$mark" "$up" "$(json_escape "$dev")" "$(json_escape "$ip")" "$uptime" "$rx" "$tx" "$packets" "$bytes" "$route_ok" "$cfg_weight"
+}
+
+watchdog_status() {
+	local enabled=false last=""
+	crontab -l 2>/dev/null | grep -q '/root/mwan3-watchdog.sh' && enabled=true
+	last=$(logread 2>/dev/null | grep 'lb3-watchdog' | tail -n 1)
+	printf '{"enabled":%s,"interval":120,"last_event":"%s"}' "$enabled" "$(json_escape "$last")"
+}
+
+status() {
+	local active=false enabled=false mode w1 w2 w3 now
+	nft list table inet lb >/dev/null 2>&1 && active=true
+	/etc/init.d/lb3 enabled >/dev/null 2>&1 && enabled=true
+	mode=$(uci_get mode balance)
+	w1=$(uci_get wan_weight 1); w2=$(uci_get wan2_weight 1); w3=$(uci_get wan3_weight 1)
+	now=$(date +%s)
+	printf '{"active":%s,"enabled":%s,"mode":"%s","timestamp":%s,"interfaces":[' "$active" "$enabled" "$mode" "$now"
+	iface_json wan '主线 WAN' 101 0x65 "$w1"
+	printf ','
+	iface_json wan2 '线路 WAN2' 102 0x66 "$w2"
+	printf ','
+	iface_json wan3 '线路 WAN3' 103 0x67 "$w3"
+	printf '],"watchdog":'
+	watchdog_status
+	printf '}'
+}
+
+valid_weight() {
+	case "$1" in ''|*[!0-9]*) return 1;; esac
+	[ "$1" -ge 0 ] && [ "$1" -le 10 ]
+}
+
+build_map() {
+	local mode="$1" w1="$2" w2="$3" w3="$4" total=0 entries="" i mark n
+	case "$mode" in
+		force_wan) w1=1; w2=0; w3=0;;
+		force_wan2) w1=0; w2=1; w3=0;;
+		force_wan3) w1=0; w2=0; w3=1;;
+	esac
+	for pair in "0x65:$w1" "0x66:$w2" "0x67:$w3"; do
+		mark=${pair%%:*}; n=${pair#*:}; i=0
+		while [ "$i" -lt "$n" ]; do
+			[ -n "$entries" ] && entries="$entries, "
+			entries="$entries$total : $mark"
+			total=$((total + 1)); i=$((i + 1))
+		done
+	done
+	[ "$total" -gt 0 ] || return 1
+	LB3_TOTAL=$total
+	LB3_ENTRIES=$entries
+}
+
+write_rules() {
+	local mode="$1" w1="$2" w2="$3" w3="$4" tmp="/tmp/lb3.rules.$$" check="/tmp/lb3-check.$$"
+	build_map "$mode" "$w1" "$w2" "$w3" || return 1
+	cat > "$tmp" <<EOF
+table inet lb {
+  chain prerouting {
+    type filter hook prerouting priority mangle; policy accept;
+    iifname != "br-lan" return
+    ip daddr { 192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8, 100.64.0.0/10, 224.0.0.0/4 } return
+    ct state established,related meta mark set ct mark accept
+    ct state new meta mark set numgen random mod $LB3_TOTAL map { $LB3_ENTRIES }
+    meta mark 0x65 counter comment "lb3-wan"
+    meta mark 0x66 counter comment "lb3-wan2"
+    meta mark 0x67 counter comment "lb3-wan3"
+    ct mark set meta mark
+  }
+  chain output {
+    type route hook output priority mangle; policy accept;
+    ip daddr { 192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8, 100.64.0.0/10, 224.0.0.0/4 } return
+    ct state established,related meta mark set ct mark accept
+    ct state new meta mark set numgen random mod $LB3_TOTAL map { $LB3_ENTRIES }
+    meta mark 0x65 counter comment "lb3-wan"
+    meta mark 0x66 counter comment "lb3-wan2"
+    meta mark 0x67 counter comment "lb3-wan3"
+    ct mark set meta mark
+  }
+}
+EOF
+	sed 's/^table inet lb /table inet lb3_validate /' "$tmp" > "$check"
+	if ! nft -c -f "$check" >/dev/null 2>&1; then
+		rm -f "$tmp" "$check"
+		return 1
+	fi
+	rm -f "$check"
+	cp "$tmp" /etc/lb3.rules && rm -f "$tmp"
+}
+
+set_config() {
+	local input mode w1 w2 w3
+	read -r input
+	mode=$(printf '%s' "$input" | jsonfilter -e '@.mode' 2>/dev/null)
+	w1=$(printf '%s' "$input" | jsonfilter -e '@.wan' 2>/dev/null)
+	w2=$(printf '%s' "$input" | jsonfilter -e '@.wan2' 2>/dev/null)
+	w3=$(printf '%s' "$input" | jsonfilter -e '@.wan3' 2>/dev/null)
+	case "$mode" in balance|force_wan|force_wan2|force_wan3) ;; *) printf '{"success":false,"error":"invalid mode"}'; return;; esac
+	valid_weight "$w1" && valid_weight "$w2" && valid_weight "$w3" || { printf '{"success":false,"error":"weight must be 0-10"}'; return; }
+	[ "$mode" != balance ] || [ $((w1 + w2 + w3)) -gt 0 ] || { printf '{"success":false,"error":"at least one line is required"}'; return; }
+	write_rules "$mode" "$w1" "$w2" "$w3" || { printf '{"success":false,"error":"nft validation failed"}'; return; }
+	uci set "$UCI.mode=$mode"
+	uci set "$UCI.wan_weight=$w1"
+	uci set "$UCI.wan2_weight=$w2"
+	uci set "$UCI.wan3_weight=$w3"
+	uci commit lb3ui
+	/etc/init.d/lb3 enable >/dev/null 2>&1
+	/etc/init.d/lb3 restart >/dev/null 2>&1
+	printf '{"success":true}'
+}
+
+service_action() {
+	local input action
+	read -r input
+	action=$(printf '%s' "$input" | jsonfilter -e '@.action' 2>/dev/null)
+	case "$action" in
+		start)
+			write_rules "$(uci_get mode balance)" "$(uci_get wan_weight 1)" "$(uci_get wan2_weight 1)" "$(uci_get wan3_weight 1)" || { printf '{"success":false,"error":"nft validation failed"}'; return; }
+			/etc/init.d/lb3 enable >/dev/null 2>&1
+			/etc/init.d/lb3 restart >/dev/null 2>&1
+			;;
+		stop)
+			/etc/init.d/lb3 disable >/dev/null 2>&1
+			/etc/init.d/lb3 stop >/dev/null 2>&1
+			;;
+		restart)
+			/etc/init.d/lb3 restart >/dev/null 2>&1
+			;;
+		*) printf '{"success":false,"error":"invalid action"}'; return;;
+	esac
+	printf '{"success":true}'
+}
+
+case "$1" in
+	list)
+		printf '{"status":{},"setConfig":{"mode":"str","wan":"int","wan2":"int","wan3":"int"},"service":{"action":"str"}}'
+		;;
+	call)
+		case "$2" in
+			status) status;;
+			setConfig) set_config;;
+			service) service_action;;
+			*) printf '{"error":"unknown method"}';;
+		esac
+		;;
+esac
