@@ -52,11 +52,11 @@ status() {
 	w1=$(uci_get wan_weight 1); w2=$(uci_get wan2_weight 1); w3=$(uci_get wan3_weight 1)
 	now=$(date +%s)
 	printf '{"active":%s,"enabled":%s,"mode":"%s","timestamp":%s,"interfaces":[' "$active" "$enabled" "$mode" "$now"
-	iface_json wan '主线 WAN' 101 0x65 "$w1"
+	iface_json wan '主线 WAN' 101 0x6500 "$w1"
 	printf ','
-	iface_json wan2 '线路 WAN2' 102 0x66 "$w2"
+	iface_json wan2 '线路 WAN2' 102 0x6600 "$w2"
 	printf ','
-	iface_json wan3 '线路 WAN3' 103 0x67 "$w3"
+	iface_json wan3 '线路 WAN3' 103 0x6700 "$w3"
 	printf '],"watchdog":'
 	watchdog_status
 	printf '}'
@@ -74,7 +74,7 @@ build_map() {
 		force_wan2) w1=0; w2=1; w3=0;;
 		force_wan3) w1=0; w2=0; w3=1;;
 	esac
-	for pair in "0x65:$w1" "0x66:$w2" "0x67:$w3"; do
+	for pair in "0x6500:$w1" "0x6600:$w2" "0x6700:$w3"; do
 		mark=${pair%%:*}; n=${pair#*:}; i=0
 		while [ "$i" -lt "$n" ]; do
 			[ -n "$entries" ] && entries="$entries, "
@@ -98,9 +98,9 @@ table inet lb {
     ip daddr { 192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8, 100.64.0.0/10, 224.0.0.0/4 } return
     ct state established,related meta mark set ct mark accept
     ct state new meta mark set numgen random mod $LB3_TOTAL map { $LB3_ENTRIES }
-    meta mark 0x65 counter comment "lb3-wan"
-    meta mark 0x66 counter comment "lb3-wan2"
-    meta mark 0x67 counter comment "lb3-wan3"
+    meta mark 0x6500 counter comment "lb3-wan"
+    meta mark 0x6600 counter comment "lb3-wan2"
+    meta mark 0x6700 counter comment "lb3-wan3"
     ct mark set meta mark
   }
   chain output {
@@ -108,9 +108,9 @@ table inet lb {
     ip daddr { 192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8, 100.64.0.0/10, 224.0.0.0/4 } return
     ct state established,related meta mark set ct mark accept
     ct state new meta mark set numgen random mod $LB3_TOTAL map { $LB3_ENTRIES }
-    meta mark 0x65 counter comment "lb3-wan"
-    meta mark 0x66 counter comment "lb3-wan2"
-    meta mark 0x67 counter comment "lb3-wan3"
+    meta mark 0x6500 counter comment "lb3-wan"
+    meta mark 0x6600 counter comment "lb3-wan2"
+    meta mark 0x6700 counter comment "lb3-wan3"
     ct mark set meta mark
   }
 }

@@ -1,0 +1,34 @@
+#!/bin/sh /etc/rc.common
+START=95
+add_from_rules() {
+  local n="$1" t="$2" p="$3"
+  local ip=$(ip -4 addr show dev pppoe-$n 2>/dev/null | awk '/inet/{print $2; exit}')
+  [ -n "$ip" ] && ip rule add pref $p from $ip lookup $t 2>/dev/null
+}
+start() {
+  nft -f /etc/lb3.rules 2>/dev/null
+  ip rule add pref 25010 fwmark 0x6500 lookup 101 2>/dev/null
+  ip rule add pref 25020 fwmark 0x6600 lookup 102 2>/dev/null
+  ip rule add pref 25030 fwmark 0x6700 lookup 103 2>/dev/null
+  add_from_rules wan 101 30011
+  add_from_rules wan2 102 30021
+  add_from_rules wan3 103 30031
+  ip route replace default dev pppoe-wan table 101 2>/dev/null
+  ip route replace default dev pppoe-wan2 metric 10 table 101 2>/dev/null
+  ip route replace default dev pppoe-wan3 metric 20 table 101 2>/dev/null
+  ip route replace default dev pppoe-wan2 table 102 2>/dev/null
+  ip route replace default dev pppoe-wan metric 10 table 102 2>/dev/null
+  ip route replace default dev pppoe-wan3 metric 20 table 102 2>/dev/null
+  ip route replace default dev pppoe-wan3 table 103 2>/dev/null
+  ip route replace default dev pppoe-wan metric 10 table 103 2>/dev/null
+  ip route replace default dev pppoe-wan2 metric 20 table 103 2>/dev/null
+  for table in 101 102 103; do
+    for prefix in 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 198.18.0.0/15 224.0.0.0/4; do
+      ip route replace throw $prefix table $table 2>/dev/null
+    done
+  done
+}
+stop() {
+  nft delete table inet lb 2>/dev/null
+  for p in 25010 25020 25030 30011 30021 30031; do while ip rule del pref $p 2>/dev/null; do :; done; done
+}
